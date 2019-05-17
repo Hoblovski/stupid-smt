@@ -1,0 +1,9 @@
+[package]
+name = "stupid-smt"
+version = "0.1.0"
+authors = ["dzy <daizy15@mails.tsinghua.edu.cn>"]
+edition = "2018"
+
+[dependencies]
+minisat = "0.4.3"
+maplit = "1.0.1"
