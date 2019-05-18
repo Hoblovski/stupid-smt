@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::convert::From;
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 use std::fmt;
 use std::collections::BTreeSet as Set;
@@ -14,15 +15,21 @@ pub enum Formula {
 }
 use Formula::*;
 
+impl From<bool> for Formula {
+    fn from(item: bool) -> Self {
+        if item { True } else { False }
+    }
+}
+
 impl Formula {
-    fn simpl_or_comps<T>(it: T) -> Formula
+    fn simpl_or_comps<T>(it: T) -> Rc<Formula>
         where T: Iterator<Item=Rc<Formula>>
     {
         let mut comps = Vec::new();
         for v in it {
             match &*v {
                 True =>
-                    return True,
+                    return Rc::new(True),
                 False =>
                     continue,
                 Var(..) | Neg(..) | And(..) =>
@@ -32,10 +39,14 @@ impl Formula {
             }
         }
         comps.dedup();
-        Or(comps)
+        match comps.len() {
+            0 => Rc::new(True),
+            1 => comps[0].clone(),
+            _ => Rc::new(Or(comps))
+        }
     }
 
-    fn simpl_and_comps<T>(it: T) -> Formula
+    fn simpl_and_comps<T>(it: T) -> Rc<Formula>
         where T: Iterator<Item=Rc<Formula>>
     {
         let mut comps = Vec::new();
@@ -44,7 +55,7 @@ impl Formula {
                 True =>
                     continue,
                 False =>
-                    return False,
+                    return Rc::new(False),
                 Var(..) | Neg(..) | Or(..) =>
                     comps.push(v),
                 And(v) =>
@@ -52,7 +63,11 @@ impl Formula {
             }
         }
         comps.dedup();
-        And(comps)
+        match comps.len() {
+            0 => Rc::new(True),
+            1 => comps[0].clone(),
+            _ => Rc::new(And(comps))
+        }
     }
 
     /// simplify and demorgan
@@ -63,22 +78,52 @@ impl Formula {
                 True => False,
                 False => True,
                 Var(x) => Var(-*x),
-                And(v) => Self::simpl_or_comps(v.iter()
+                And(v) => return Self::simpl_or_comps(v.iter()
                     .map(|x| Self::simpl_demorgan(Rc::new(Neg(x.clone()))))),
-                Or(v) => Self::simpl_and_comps(v.iter()
+                Or(v) => return Self::simpl_and_comps(v.iter()
                     .map(|x| Self::simpl_demorgan(Rc::new(Neg(x.clone()))))),
                 Neg(v) => return Self::simpl_demorgan(v.clone()),
             },
-            And(v) => Self::simpl_and_comps(v.iter()
+            And(v) => return Self::simpl_and_comps(v.iter()
                 .map(|x| Self::simpl_demorgan(x.clone()))),
-            Or(v) => Self::simpl_or_comps(v.iter()
+            Or(v) => return Self::simpl_or_comps(v.iter()
                 .map(|x| Self::simpl_demorgan(x.clone()))),
         };
         Rc::new(r)
     }
+
+    pub fn not(a: &Rc<Formula>) -> Rc<Formula> {
+        Rc::new(Neg(a.clone()))
+    }
+
+    pub fn and(a: &Rc<Formula>, b: &Rc<Formula>) -> Rc<Formula> {
+        Rc::new(And(vec![a.clone(), b.clone()]))
+    }
+
+    pub fn or(a: &Rc<Formula>, b: &Rc<Formula>) -> Rc<Formula> {
+        Rc::new(Or(vec![a.clone(), b.clone()]))
+    }
+
+    pub fn xor(a: &Rc<Formula>, b: &Rc<Formula>) -> Rc<Formula> {
+        Formula::or(
+            &Formula::and(a, &Formula::not(b)),
+            &Formula::and(&Formula::not(a), b))
+    }
+
+    pub fn iff(a: &Rc<Formula>, b: &Rc<Formula>) -> Rc<Formula> {
+        Formula::or(
+            &Formula::and(a, b),
+            &Formula::and(&Formula::not(a), &Formula::not(b)))
+    }
 }
 
 pub struct ConjNormalFormula(Set<Set<isize>>);
+
+impl ConjNormalFormula {
+    pub fn get_inner(&self) -> &Set<Set<isize>> {
+        &self.0
+    }
+}
 
 impl fmt::Display for ConjNormalFormula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -91,47 +136,6 @@ impl fmt::Display for ConjNormalFormula {
 }
 
 
-impl BitAnd for Formula {
-    type Output = Self;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        let mut lhs = match self {
-            And(v) => v, True => vec![], x => vec![Rc::new(x)],
-        };
-        let mut rhs = match rhs {
-            And(v) => v, True => vec![], x => vec![Rc::new(x)],
-        };
-        lhs.append(&mut rhs);
-        And(lhs)
-    }
-}
-
-impl BitOr for Formula {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        let mut lhs = match self {
-            Or(v) => v, False => vec![], x => vec![Rc::new(x)],
-        };
-        let mut rhs = match rhs {
-            Or(v) => v, False => vec![], x => vec![Rc::new(x)],
-        };
-        lhs.append(&mut rhs);
-        Or(lhs)
-    }
-}
-
-impl Not for Formula {
-    type Output = Self;
-
-    fn not(self) -> Self::Output {
-        match self {
-            True => False,
-            False => True,
-            _ => Neg(Rc::new(self))
-        }
-    }
-}
 
 /// Each element ss in sss is a Set<Set<T>>.
 /// Select an element s from each ss, join them to get a resulting so.

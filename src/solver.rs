@@ -4,118 +4,136 @@ use std::rc::Rc;
 use std::marker::PhantomData;
 use crate::expr::*;
 use crate::logic::*;
-
-type BVSymIdInner = usize;
-
-/// bit-vector variable identifier.
-#[derive(Debug)]
-pub struct BVSymId<'c> {
-    id: BVSymIdInner,
-    ctx: PhantomData<&'c Context<'c>>,
-}
-
-impl<'c> BVSymId<'c> {
-    pub fn new(c: &'c Context<'c>, id: BVSymIdInner) -> BVSymId<'c> {
-        BVSymId { id, ctx: PhantomData }
-    }
-}
+use crate::logic::Formula as fmla;
 
 #[derive(Debug)]
 struct BVSymInfo<'c> {
-    width: usize,
+    width: isize,
     name: &'c str,
+    low: isize,
+    high: isize, // low..high are the isize's for Formula
 }
 
 /// holds variable definitions. all solvers, expressions, syms depend on it.
 #[derive(Debug)]
 pub struct Context<'c> {
-    vars_tbl: RefCell<HashMap<&'c str, BVSymIdInner>>,
-    vars_info: RefCell<HashMap<BVSymIdInner, BVSymInfo<'c>>>,
+    vars_tbl: RefCell<HashMap<&'c str, isize>>,
+    vars_info: RefCell<HashMap<isize, BVSymInfo<'c>>>,
+    var_cnt: RefCell<isize>,
 }
 
 impl<'c> Context<'c> {
     pub fn new<'a>() -> Context<'a> {
-        Context { vars_tbl: RefCell::new(HashMap::new()), vars_info: RefCell::new(HashMap::new()) }
+        Context {
+            vars_tbl: RefCell::new(HashMap::new()),
+            vars_info: RefCell::new(HashMap::new()),
+            var_cnt: RefCell::new(1),
+        }
     }
 
-    pub fn fresh_bvsym(&'c self, name: &'c str, width: usize) -> BVSymId<'c>
+    pub fn fresh_bvsym(&'c self, name: &'c str, width: isize) -> Vec<isize>
     {
         let mut vars_tbl = self.vars_tbl.borrow_mut();
         let mut vars_info = self.vars_info.borrow_mut();
+        let mut var_cnt = self.var_cnt.borrow_mut();
         if vars_tbl.contains_key(name) { panic!("not a fresh variable"); }
-        let id = vars_tbl.len();
+        let id = vars_tbl.len() as isize;
+        let low = *var_cnt;
+        let high = *var_cnt + width;
         vars_tbl.insert(name, id);
-        vars_info.insert(id, BVSymInfo { width, name });
-        BVSymId::new(self, id)
+        vars_info.insert(id, BVSymInfo { width, name, low, high });
+        let r = (low..high).collect();
+        *var_cnt += width;
+        r
     }
 
     pub fn solver(&'c self) -> Solver<'c> {
         let mut sat_solver = minisat::Solver::new();
-        let vars_info = self.vars_info.borrow();
         let mut props = HashMap::new();
-        for (id, BVSymInfo { width, name }) in vars_info.iter() {
-            let mut bits = Vec::with_capacity(*width);
-            for _ in 0..*width { bits.push(sat_solver.new_lit()); }
-            props.insert(*id, bits);
+        let var_cnt: isize = *self.var_cnt.borrow();
+        for i in 1..var_cnt {
+            props.insert(i, sat_solver.new_lit());
         }
-
-        Solver { sat_solver, ctx: self, props, clauses: vec![] }
+        Solver {
+            sat_solver: RefCell::new(sat_solver),
+            ctx: self,
+            props,
+            constraints: RefCell::new(Rc::new(fmla::True)),
+        }
     }
 }
 
 /// on top of a context, holds a formulae.
 #[derive(Debug)]
 pub struct Solver<'c> {
-    sat_solver: minisat::Solver,
+    sat_solver: RefCell<minisat::Solver>,
     ctx: &'c Context<'c>,
-    /// props[i][j]: the j-th bit of the symbol with id=i
-    props: HashMap<BVSymIdInner, Vec<minisat::Bool>>,
-    clauses: Vec<Bool<'c>>
+    /// props[i]
+    props: HashMap<isize, minisat::Bool>,
+    constraints: RefCell<Rc<Formula>>,
 }
 
 
 /// might outlive the context.
 pub struct Model {
-    m: HashMap<String, usize>,
+    m: HashMap<String, isize>,
 }
 
 impl Model {
 }
 
-enum CheckResult {
-    Sat(Model),
+#[derive(Debug)]
+pub enum CheckResult {
+    Sat, //(Model),
     Unsat,
 }
 
 impl<'c> Solver<'c> {
-    fn assert(&self, clause: Bool) {
-
+    pub fn assert(&'c self, constraint: &'c Bool<'c>) {
+        let f = self.bool_encode(constraint);
+        let mut constraints = self.constraints.borrow_mut();
+        *constraints = fmla::and(&f, &*constraints);
     }
 
-    fn check(self) -> CheckResult {
-        panic!("check");
+    pub fn check(&'c self) -> CheckResult {
+        let mut constraints = self.constraints.borrow_mut();
+        *constraints = fmla::simpl_demorgan(constraints.clone());
+        let cnf = nnf_to_cnf(constraints.clone());
+        let mut sat_solver = self.sat_solver.borrow_mut();
+        for clause in cnf.get_inner() {
+            sat_solver.add_clause(
+                clause.iter().map(|x|
+                    if x > &0 { self.props[x] } else { !self.props[&-*x] }));
+        }
+        match sat_solver.solve() {
+            Ok(m) => CheckResult::Sat,
+            Err(()) => CheckResult::Unsat
+        }
     }
 
-//    fn bv_encode(&self, b: &BVExpr<'c>) -> Vec<Prop> {
-//        use BVExpr::*;
-//        match b {
-//            Const(len, val) => {
-//                let mut val = *val;
-//                let mut r = Vec::with_capacity(*len);
-//                for _ in 0..*len { r.push((val & 1 != 0).into()); }
-//                r
-//            }, 
-//            Add(box a, box b) => {
-//                let a = self.bv_encode(a);
-//                let b = self.bv_encode(b);
-//                assert!(a.len() == b.len());
-//                a.into_iter().zip(b.iter()).scan(false.into(),
-//                    |carry, (b1, b2)| {
-//                        let r = carry 
-//                    }
-//                ).collect()
-//            }, 
-//            _ => unimplemented!(), 
-//        }
-//    }
+    fn bv_encode(&self, b: &BVExpr<'c>) -> Vec<Rc<Formula>> {
+        use BVExpr::*;
+        match b {
+            Symb(v) => v.iter()
+                .map(|&x| Rc::new(fmla::Var(x))).collect(),
+            Const(v) => v.iter()
+                .map(|&x| Rc::new(if x { fmla::True } else { fmla::False }))
+                .collect(),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn bool_encode(&self, b: &Bool<'c>) -> Rc<Formula> {
+        use Bool::*;
+        match b {
+            BVEq(a, b) => {
+                let a = self.bv_encode(a);
+                let b = self.bv_encode(b);
+                a.iter().zip(b.iter()).fold(Rc::new(fmla::True),
+                    |st, (b1, b2)| { fmla::and(&st, &fmla::iff(b1, b2)) }
+                )
+            },
+            _ => unimplemented!()
+        }
+    }
 }
